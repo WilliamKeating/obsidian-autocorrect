@@ -103,7 +103,7 @@ export default class AutoCorrecter extends Plugin {
 		};
 
 		const data = {
-			model: "mistralai/Mixtral-8x7B-Instruct-v0.1",
+			model: "mistralai/Mistral-7B-Instruct-v0.1",
 			messages: [
 				{ role: "system", content: system_content },
 				{ role: "user", content: user_content },
