@@ -2,10 +2,10 @@
 	"id": "obsidian-autocorrect",
 	"name": "Obsidian Autocorrect",
 	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
+	"minAppVersion": "1.5.3",
+	"description": "Autocorrects spelling mistakes in Obsidian using a large language model.",
 	"author": "William Keating",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"authorUrl": "https://github.com/WilliamKeating/obsidian-autocorrect",
+	"fundingUrl": "https://www.buymeacoffee.com/williamkeating",
 	"isDesktopOnly": false
 }
