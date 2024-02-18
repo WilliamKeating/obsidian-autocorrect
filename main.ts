@@ -95,7 +95,7 @@ export default class AutoCorrecter extends Plugin {
 		const url = "https://api.together.xyz/v1/chat/completions";
 		const apiKey = this.settings.api_key;
 		const system_content =
-			"You will receive user input containing text with potential spelling errors. Your task is to correct these errors while preserving the original meaning. The original text may contain markdown, which should be maintained. You should ONLY correct spelling errors; grammar and punctuation should remain EXACTLY the same. The output should be a corrected version of the input text. Additionally, the model should leave correct words verbatim, even if they may be offensive, slang, abbreviations, brand names, or other non-standard language intentionally input by the user. This system will be utilized for real-time autocorrection, so refrain from altering a word unless you understand the user's intended meaning.";
+			"You will receive user input containing text with potential spelling errors. Your task is to correct these errors while preserving the original meaning. The original text may contain Markdown, which should be maintained. You should ONLY correct spelling errors; grammar and punctuation should remain EXACTLY the same. The output should be a corrected version of the input text. Additionally, the model should leave correct words verbatim, even if they may be offensive, slang, abbreviations, brand names, or other non-standard language intentionally input by the user. This system will be utilized for real-time autocorrection, so refrain from altering a word unless you understand the user's intended meaning.";
 		const user_content = '{"user_text": "' + text + '"}';
 
 		const headers: Record<string, string> = {
@@ -120,7 +120,6 @@ export default class AutoCorrecter extends Plugin {
 				},
 			},
 			temperature: 0.7,
-			max_tokens: 500,
 		};
 
 		const params: RequestUrlParam = {
