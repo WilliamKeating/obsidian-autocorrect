@@ -1,5 +1,4 @@
 import {
-	Editor,
 	Plugin,
 	MarkdownView,
 	Notice,
