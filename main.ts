@@ -78,14 +78,11 @@ export default class AutoCorrecter extends Plugin {
 					}
 				} else {
 					if (status) {
-						status.setMessage(
-							"Error correcting spelling. Make sure API key is correct and Internet is working."
-						);
-					} else {
-						new Notice(
-							"Error correcting spelling. Make sure API key is correct and Internet is working."
-						);
+						status.hide();
 					}
+					new Notice(
+						"Error correcting spelling. Make sure API key is correct and Internet is working."
+					);
 				}
 			}
 		}
