@@ -47,6 +47,12 @@ export default class AutoCorrecter extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+	stripLeadingWhitespace(input: string): [string, string] {
+		const match = input.match(/^[\t ]*/);
+		const leadingWhitespace = match ? match[0] : "";
+		const parsedText = input.replace(/^[\t ]*/, "");
+		return [leadingWhitespace, parsedText];
+	}
 
 	async onKeyDown(event: KeyboardEvent) {
 		if (event.key === "Enter") {
@@ -55,6 +61,9 @@ export default class AutoCorrecter extends Plugin {
 			if (view) {
 				const cursor = view.editor.getCursor();
 				const text = view.editor.getLine(cursor.line);
+				// LLM has a very hard time reproducing the leading tabs in markdown bullet points
+				const [leadingWhitespace, parsedText] =
+					this.stripLeadingWhitespace(text);
 				console.log(cursor);
 				console.log(text);
 				let status: Notice | null = null;
@@ -66,13 +75,12 @@ export default class AutoCorrecter extends Plugin {
 						0
 					);
 				}
-				const response: any = await this.getLLMResponse(text);
+				const response: any = await this.getLLMResponse(parsedText);
 				console.log(response);
 				if (response.corrected_spelling) {
-					view.editor.setLine(
-						cursor.line,
-						response.corrected_spelling
-					);
+					const correctedText =
+						leadingWhitespace + response.corrected_spelling;
+					view.editor.setLine(cursor.line, correctedText);
 					if (status) {
 						status.hide();
 					}
