@@ -96,11 +96,32 @@ export default class AutoCorrecter extends Plugin {
 		}
 	}
 	async getLLMResponse(text: string) {
-		const url = "https://api.together.xyz/v1/chat/completions";
+		const url = "https://api.groq.com/openai/v1/chat/completions";
 		const apiKey = this.settings.api_key;
-		const system_content =
-			"You will receive user input containing text with potential spelling errors. Your task is to correct these errors while preserving the original meaning. The original text may contain Markdown, which should be maintained. You should ONLY correct spelling errors; grammar and punctuation should remain EXACTLY the same. The output should be a corrected version of the input text. Additionally, the model should leave correct words verbatim, even if they may be offensive, slang, abbreviations, brand names, or other non-standard language intentionally input by the user. This system will be utilized for real-time autocorrection, so refrain from altering a word unless you understand the user's intended meaning.";
-		const user_content = '{"user_text": "' + text + '"}';
+		const content = `Your task is to take input text that may contain spelling errors and correct those errors while
+			preserving the original meaning, grammar, punctuation and formatting. The text may contain Markdown
+			or other formatting which should be maintained in the output.
+			
+			Here is the input text that needs to be corrected:
+			
+			<input_text>
+			${text}
+			</input_text>
+			
+			First, think through your approach in a <scratchpad> section:
+			- Carefully read through the text and identify any words that appear to be misspelled
+			- For each potential misspelling, consider the context and your understanding of the intended
+			meaning to determine the most likely correct spelling
+			- Make sure to preserve any grammatical errors, unusual punctuation, proper nouns, slang,
+			abbreviations or intentionally informal language in the original text
+			- Check that your proposed corrections don't change the meaning or formatting of the original text
+			
+			Then, provide the corrected version of the input text with all formatting perfectly preserved inside
+			<corrected_text> tags. ONLY correct clear spelling mistakes. Do not make any other changes.
+			
+			Example format for your response:
+  			<scratchpad>Carefully read through the text and identify any words that appear to be misspelled.<scratchpad>
+  			<corrected_text>Corrected version of the input text with all formatting perfectly preserved.</corrected_text>`;
 
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
@@ -108,22 +129,8 @@ export default class AutoCorrecter extends Plugin {
 		};
 
 		const data = {
-			model: "mistralai/Mistral-7B-Instruct-v0.1",
-			messages: [
-				{ role: "system", content: system_content },
-				{ role: "user", content: user_content },
-			],
-			response_format: {
-				type: "json_object",
-				schema: {
-					type: "object",
-					properties: {
-						corrected_spelling: { type: "string" },
-					},
-					required: ["corrected_spelling"],
-				},
-			},
-			temperature: 0.7,
+			model: "llama3-70b-8192",
+			messages: [{ role: "user", content: content }],
 		};
 
 		const params: RequestUrlParam = {
@@ -133,11 +140,14 @@ export default class AutoCorrecter extends Plugin {
 			url: url,
 		};
 		try {
-			const response = await requestUrl(params);
-			const json_response = JSON.parse(
-				response.json.choices[0].message.content
-			);
-			return json_response;
+			const response: any = await requestUrl(params);
+			console.log(response);
+			const parsedResponse = response.json.choices[0].message.content
+				.split("<corrected_text>")[1]
+				.split("</corrected_text>")[0]
+				.replace(/\n/g, "");
+
+			return { corrected_spelling: parsedResponse };
 		} catch (error) {
 			console.error(error);
 			return error;
@@ -158,9 +168,9 @@ class SettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName("Together.ai API Key")
+			.setName("Groq API Key")
 			.setDesc(
-				"Create a account at https://www.together.ai/ and enter your API key for the plugin to work."
+				"Create a account at https://www.groq.com/ and enter your API key for the plugin to work."
 			)
 			.addText((text) =>
 				text
