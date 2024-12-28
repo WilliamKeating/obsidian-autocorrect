@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-autocorrect",
 	"name": "Obsidian Autocorrect",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"minAppVersion": "1.5.3",
 	"description": "Autocorrects spelling mistakes in Obsidian using a large language model.",
 	"author": "William Keating",
