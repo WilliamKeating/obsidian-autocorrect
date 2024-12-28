@@ -102,25 +102,14 @@ export default class AutoCorrecter extends Plugin {
 			preserving the original meaning, grammar, punctuation and formatting. The text may contain Markdown
 			or other formatting which should be maintained in the output.
 			
-			Here is the input text that needs to be corrected:
-			
 			<input_text>
 			${text}
 			</input_text>
 			
-			First, think through your approach in a <scratchpad> section:
-			- Carefully read through the text and identify any words that appear to be misspelled
-			- For each potential misspelling, consider the context and your understanding of the intended
-			meaning to determine the most likely correct spelling
-			- Make sure to preserve any grammatical errors, unusual punctuation, proper nouns, slang,
-			abbreviations or intentionally informal language in the original text
-			- Check that your proposed corrections don't change the meaning or formatting of the original text
-			
-			Then, provide the corrected version of the input text with all formatting perfectly preserved inside
+			Provide the corrected version of the input text with all formatting perfectly preserved inside
 			<corrected_text> tags. ONLY correct clear spelling mistakes. Do not make any other changes.
 			
 			Example format for your response:
-  			<scratchpad>Carefully read through the text and identify any words that appear to be misspelled.<scratchpad>
   			<corrected_text>Corrected version of the input text with all formatting perfectly preserved.</corrected_text>`;
 
 		const headers: Record<string, string> = {
@@ -129,7 +118,7 @@ export default class AutoCorrecter extends Plugin {
 		};
 
 		const data = {
-			model: "llama3-70b-8192",
+			model: "llama-3.3-70b-versatile",
 			messages: [{ role: "user", content: content }],
 		};
 
