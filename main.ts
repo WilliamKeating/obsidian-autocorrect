@@ -12,11 +12,13 @@ import {
 interface PluginSettings {
 	api_key: string;
 	status_notices: boolean;
+	autocorrect_on_enter: boolean;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
 	status_notices: true,
 	api_key: "",
+	autocorrect_on_enter: false,
 };
 
 export default class AutoCorrecter extends Plugin {
@@ -26,6 +28,15 @@ export default class AutoCorrecter extends Plugin {
 		await this.loadSettings();
 		this.onKeyDown = this.onKeyDown.bind(this);
 		this.registerDomEvent(document, "keydown", this.onKeyDown, true);
+		this.addCommand({
+			id: "autocorrect-current-line",
+			name: "Autocorrect current line",
+			editorCallback: async (_editor, view) => {
+				if (view instanceof MarkdownView) {
+					await this.correctCurrentLine(view);
+				}
+			},
+		});
 		this.addSettingTab(new SettingTab(this.app, this));
 		if (!this.settings.api_key) {
 			new Notice(
@@ -55,48 +66,42 @@ export default class AutoCorrecter extends Plugin {
 	}
 
 	async onKeyDown(event: KeyboardEvent) {
-		if (event.key === "Enter") {
+		if (event.key === "Enter" && this.settings.autocorrect_on_enter) {
 			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-			// Make sure the user is editing a Markdown file.
 			if (view) {
-				const cursor = view.editor.getCursor();
-				const text = view.editor.getLine(cursor.line);
-				// Check if the text is empty and return early if it is
-				if (text.trim() === "") {
-					return;
-				}
-				// LLM has a very hard time reproducing the leading tabs in markdown bullet points
-				const [leadingWhitespace, parsedText] =
-					this.stripLeadingWhitespace(text);
-				console.log(cursor);
-				console.log(text);
-				let status: Notice | null = null;
-				if (this.settings.status_notices) {
-					status = new Notice(
-						"Correcting spelling on line " +
-							(cursor.line + 1) +
-							"...",
-						0
-					);
-				}
-				const response: any = await this.getLLMResponse(parsedText);
-				console.log(response);
-				if (response.corrected_spelling) {
-					const correctedText =
-						leadingWhitespace + response.corrected_spelling;
-					view.editor.setLine(cursor.line, correctedText);
-					if (status) {
-						status.hide();
-					}
-				} else {
-					if (status) {
-						status.hide();
-					}
-					new Notice(
-						"Error correcting spelling. Make sure API key is correct and Internet is working."
-					);
-				}
+				void this.correctCurrentLine(view);
 			}
+		}
+	}
+
+	async correctCurrentLine(view: MarkdownView) {
+		const cursor = view.editor.getCursor();
+		const text = view.editor.getLine(cursor.line);
+		if (text.trim() === "") {
+			return;
+		}
+		const [leadingWhitespace, parsedText] = this.stripLeadingWhitespace(text);
+		let status: Notice | null = null;
+		if (this.settings.status_notices) {
+			status = new Notice(
+				"Correcting spelling on line " + (cursor.line + 1) + "...",
+				0
+			);
+		}
+		const response: any = await this.getLLMResponse(parsedText);
+		if (response.corrected_spelling) {
+			const correctedText = leadingWhitespace + response.corrected_spelling;
+			view.editor.setLine(cursor.line, correctedText);
+			if (status) {
+				status.hide();
+			}
+		} else {
+			if (status) {
+				status.hide();
+			}
+			new Notice(
+				"Error correcting spelling. Make sure API key is correct and Internet is working."
+			);
 		}
 	}
 	async getLLMResponse(text: string) {
@@ -112,6 +117,7 @@ export default class AutoCorrecter extends Plugin {
 			
 			Provide the corrected version of the input text with all formatting perfectly preserved inside
 			<corrected_text> tags. ONLY correct clear spelling mistakes. Do not make any other changes.
+			Never add tags, hashtags, links, headings, or new markdown structure.
 			
 			Example format for your response:
   			<corrected_text>Corrected version of the input text with all formatting perfectly preserved.</corrected_text>`;
@@ -183,6 +189,20 @@ class SettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.status_notices)
 					.onChange(async (value) => {
 						this.plugin.settings.status_notices = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Autocorrect on Enter")
+			.setDesc(
+				"When enabled, pressing Enter also runs autocorrect on the current line."
+			)
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.autocorrect_on_enter)
+					.onChange(async (value) => {
+						this.plugin.settings.autocorrect_on_enter = value;
 						await this.plugin.saveSettings();
 					});
 			});
