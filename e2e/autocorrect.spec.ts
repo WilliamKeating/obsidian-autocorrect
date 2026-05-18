@@ -1,4 +1,4 @@
-import { chromium, expect, test } from "@playwright/test";
+import { Browser, chromium, expect, test } from "@playwright/test";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import http from "http";
@@ -23,6 +23,7 @@ test("manual command corrects a note through Obsidian", async () => {
 	const repoRoot = path.resolve(__dirname, "..");
 	const remoteDebuggingPort = 9222;
 	let obsidian: ChildProcessWithoutNullStreams | null = null;
+	let browser: Browser | null = null;
 
 	await mkdir(pluginDir, { recursive: true });
 	await cp(path.join(repoRoot, "main.js"), path.join(pluginDir, "main.js"));
@@ -47,22 +48,25 @@ test("manual command corrects a note through Obsidian", async () => {
 	);
 
 	try {
+		console.log("Launching Obsidian test process");
 		obsidian = spawn(process.env.OBSIDIAN_PATH as string, [
 			vault,
 			`--remote-debugging-port=${remoteDebuggingPort}`,
 			"--no-sandbox",
 			"--disable-gpu",
 		], {
-		env: {
-			...process.env,
-			XDG_CONFIG_HOME: path.join(root, "xdg-config"),
-		},
+			detached: true,
+			env: {
+				...process.env,
+				XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+			},
 		});
 		obsidian.stdout.on("data", (data) => process.stdout.write(data));
 		obsidian.stderr.on("data", (data) => process.stderr.write(data));
 
 		await waitForCdp(remoteDebuggingPort);
-		const browser = await chromium.connectOverCDP(
+		console.log("Connected to Obsidian CDP endpoint");
+		browser = await chromium.connectOverCDP(
 			`http://127.0.0.1:${remoteDebuggingPort}`
 		);
 		const context = browser.contexts()[0] ?? (await browser.newContext());
@@ -90,6 +94,7 @@ test("manual command corrects a note through Obsidian", async () => {
 			(id) => Boolean(window.app?.plugins?.plugins?.[id]),
 			PLUGIN_ID
 		);
+		console.log("Plugin loaded");
 
 		await page.evaluate(async ({ commandId }) => {
 			const file = window.app.vault.getAbstractFileByPath("Autocorrect E2E.md");
@@ -107,6 +112,7 @@ test("manual command corrects a note through Obsidian", async () => {
 			editor.setCursor({ line: 0, ch: editor.getLine(0).length });
 			await window.app.commands.executeCommandById(commandId);
 		}, { commandId: COMMAND_ID });
+		console.log("Command executed");
 
 		await expect
 			.poll(async () =>
@@ -114,10 +120,19 @@ test("manual command corrects a note through Obsidian", async () => {
 			)
 			.toBe("the quick brown fox");
 
-		await browser.close();
+		console.log("Editor text corrected");
 	} finally {
-		if (obsidian && !obsidian.killed) {
-			obsidian.kill();
+		if (browser) {
+			await browser.close().catch(() => undefined);
+		}
+		if (obsidian?.pid) {
+			try {
+				process.kill(-obsidian.pid, "SIGKILL");
+			} catch {
+				obsidian.kill("SIGKILL");
+			}
+		} else if (obsidian && !obsidian.killed) {
+			obsidian.kill("SIGKILL");
 		}
 		await rm(root, { recursive: true, force: true });
 	}
