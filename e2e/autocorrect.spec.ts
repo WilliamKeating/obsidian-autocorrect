@@ -163,6 +163,15 @@ test("manual command corrects a note through Obsidian", async () => {
 			PLUGIN_ID,
 			{ timeout: 30_000 }
 		);
+		await page.evaluate((id) => {
+			const plugin = window.app.plugins.plugins?.[id];
+			if (!plugin) {
+				throw new Error("Autocorrect plugin was not loaded.");
+			}
+			plugin.getLLMResponse = async () => ({
+				corrected_spelling: "the quick brown fox",
+			});
+		}, PLUGIN_ID);
 		console.log("Plugin loaded");
 
 		await page.evaluate(async ({ commandId }) => {
