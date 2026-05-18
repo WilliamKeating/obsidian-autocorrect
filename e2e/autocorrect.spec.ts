@@ -166,12 +166,15 @@ test("manual command corrects a note through Obsidian", async () => {
 		console.log("Plugin loaded");
 
 		await page.evaluate(async ({ commandId }) => {
+			await new Promise<void>((resolve) =>
+				window.app.workspace.onLayoutReady(resolve)
+			);
 			const file = window.app.vault.getAbstractFileByPath("Autocorrect E2E.md");
 			if (!file) {
 				throw new Error("E2E note was not found in the test vault.");
 			}
 
-			const leaf = window.app.workspace.getLeaf(false);
+			const leaf = window.app.workspace.getLeaf(true);
 			await leaf.openFile(file);
 			const editor = window.app.workspace.activeEditor?.editor;
 			if (!editor) {
