@@ -38,6 +38,13 @@ test("manual command corrects a note through Obsidian", async () => {
 		"utf8"
 	);
 	await writeFile(
+		path.join(vault, ".obsidian", "app.json"),
+		JSON.stringify({
+			safeMode: false,
+		}),
+		"utf8"
+	);
+	await writeFile(
 		path.join(pluginDir, "data.json"),
 		JSON.stringify({
 			api_key: "test-key",
@@ -59,6 +66,14 @@ test("manual command corrects a note through Obsidian", async () => {
 					open: true,
 				},
 			},
+		}),
+		"utf8"
+	);
+	await writeFile(
+		path.join(obsidianConfigDir, "e2e.json"),
+		JSON.stringify({
+			path: vault,
+			open: true,
 		}),
 		"utf8"
 	);
@@ -109,6 +124,17 @@ test("manual command corrects a note through Obsidian", async () => {
 			});
 		});
 
+		await page.waitForFunction(() => Boolean(window.app?.workspace), undefined, {
+			timeout: 30_000,
+		});
+		await page.evaluate(async (id) => {
+			const plugins = window.app.plugins;
+			await plugins.loadManifests?.();
+			await plugins.enablePlugin?.(id);
+			if (!plugins.plugins?.[id]) {
+				await plugins.loadPlugin?.(id);
+			}
+		}, PLUGIN_ID);
 		await page.waitForFunction(
 			(id) => Boolean(window.app?.plugins?.plugins?.[id]),
 			PLUGIN_ID,
