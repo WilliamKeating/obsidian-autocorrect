@@ -1,18 +1,12 @@
 import { Browser, chromium, expect, test } from "@playwright/test";
-import {
-	execFile,
-	spawn,
-	type ChildProcessWithoutNullStreams,
-} from "child_process";
-import { access, cp, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import http from "http";
 import os from "os";
 import path from "path";
-import { promisify } from "util";
 
 const PLUGIN_ID = "obsidian-autocorrect";
 const COMMAND_ID = `${PLUGIN_ID}:autocorrect-current-line`;
-const execFileAsync = promisify(execFile);
 
 test.skip(
 	!process.env.OBSIDIAN_PATH,
@@ -140,17 +134,6 @@ test("manual command corrects a note through Obsidian", async () => {
 			timeout: 30_000,
 		});
 
-		await runObsidianCli(
-			process.env.OBSIDIAN_PATH as string,
-			["plugins:restrict", "off"],
-			xdgConfigHome
-		);
-		await runObsidianCli(
-			process.env.OBSIDIAN_PATH as string,
-			["plugin:enable", `id=${PLUGIN_ID}`, "filter=community"],
-			xdgConfigHome
-		);
-
 		const pluginDiagnostics = await page.evaluate(async (id) => {
 			const plugins = window.app.plugins;
 			const describe = () => ({
@@ -162,6 +145,7 @@ test("manual command corrects a note through Obsidian", async () => {
 				hasManifest: Boolean(plugins.manifests?.[id]),
 			});
 
+			await plugins.setEnable?.(true);
 			await plugins.loadManifests?.();
 			await plugins.enablePluginAndSave?.(id);
 			await plugins.enablePlugin?.(id);
@@ -258,26 +242,4 @@ function isCdpReady(port: number): Promise<boolean> {
 			finish(false);
 		});
 	});
-}
-
-async function runObsidianCli(
-	obsidianPath: string,
-	args: string[],
-	xdgConfigHome: string
-): Promise<void> {
-	const cliPath = path.join(path.dirname(obsidianPath), "obsidian-cli");
-	await access(cliPath);
-	const { stdout, stderr } = await execFileAsync(cliPath, args, {
-		env: {
-			...process.env,
-			XDG_CONFIG_HOME: xdgConfigHome,
-		},
-		timeout: 15_000,
-	});
-	if (stdout.trim()) {
-		console.log(`obsidian-cli ${args[0]} stdout: ${stdout.trim()}`);
-	}
-	if (stderr.trim()) {
-		console.log(`obsidian-cli ${args[0]} stderr: ${stderr.trim()}`);
-	}
 }
