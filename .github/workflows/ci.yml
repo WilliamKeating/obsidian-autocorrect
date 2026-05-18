@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - "codex/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Install desktop test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-xkb-utils xkb-data libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libuuid1 libsecret-1-0
+
+      - name: Download latest Obsidian AppImage
+        run: |
+          node - <<'NODE'
+          const fs = require("fs");
+          const https = require("https");
+
+          function requestJson(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, {
+                headers: {
+                  "User-Agent": "obsidian-autocorrect-ci",
+                  "Accept": "application/vnd.github+json"
+                }
+              }, (res) => {
+                let body = "";
+                res.on("data", (chunk) => body += chunk);
+                res.on("end", () => {
+                  if (res.statusCode < 200 || res.statusCode >= 300) {
+                    reject(new Error(`GitHub release request failed: ${res.statusCode} ${body}`));
+                    return;
+                  }
+                  resolve(JSON.parse(body));
+                });
+              }).on("error", reject);
+            });
+          }
+
+          function download(url, destination) {
+            return new Promise((resolve, reject) => {
+              https.get(url, { headers: { "User-Agent": "obsidian-autocorrect-ci" } }, (res) => {
+                if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+                  download(res.headers.location, destination).then(resolve, reject);
+                  return;
+                }
+                if (res.statusCode !== 200) {
+                  reject(new Error(`Download failed: ${res.statusCode}`));
+                  return;
+                }
+                const file = fs.createWriteStream(destination);
+                res.pipe(file);
+                file.on("finish", () => file.close(resolve));
+              }).on("error", reject);
+            });
+          }
+
+          (async () => {
+            const release = await requestJson("https://api.github.com/repos/obsidianmd/obsidian-releases/releases/latest");
+            const asset = release.assets.find((candidate) => candidate.name.endsWith(".AppImage") && !candidate.name.includes("arm64"));
+            if (!asset) {
+              throw new Error("Could not find an x64 Obsidian AppImage in the latest release.");
+            }
+            await download(asset.browser_download_url, "/tmp/Obsidian.AppImage");
+          })();
+          NODE
+          chmod +x /tmp/Obsidian.AppImage
+          /tmp/Obsidian.AppImage --appimage-extract
+
+      - name: Run Obsidian E2E smoke test
+        env:
+          OBSIDIAN_PATH: ${{ github.workspace }}/squashfs-root/obsidian
+        run: xvfb-run -a npm run test:e2e
