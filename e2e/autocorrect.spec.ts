@@ -67,10 +67,13 @@ test("manual command corrects a note through Obsidian", async () => {
 		await waitForCdp(remoteDebuggingPort);
 		console.log("Connected to Obsidian CDP endpoint");
 		browser = await chromium.connectOverCDP(
-			`http://127.0.0.1:${remoteDebuggingPort}`
+			`http://127.0.0.1:${remoteDebuggingPort}`,
+			{ timeout: 10_000 }
 		);
 		const context = browser.contexts()[0] ?? (await browser.newContext());
-		const page = context.pages()[0] ?? (await context.waitForEvent("page"));
+		const page =
+			context.pages()[0] ??
+			(await context.waitForEvent("page", { timeout: 30_000 }));
 
 		await page.route("https://api.groq.com/**", async (route) => {
 			await route.fulfill({
@@ -92,7 +95,8 @@ test("manual command corrects a note through Obsidian", async () => {
 
 		await page.waitForFunction(
 			(id) => Boolean(window.app?.plugins?.plugins?.[id]),
-			PLUGIN_ID
+			PLUGIN_ID,
+			{ timeout: 30_000 }
 		);
 		console.log("Plugin loaded");
 
