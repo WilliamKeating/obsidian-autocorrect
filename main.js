@@ -28,33 +28,170 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
+
+// correction.ts
+var DEFAULT_MIN_LETTERS = 3;
+var MAX_LENGTH_MULTIPLIER = 2.5;
+var MAX_LENGTH_SLACK = 24;
+function splitEditableLine(line) {
+  const match = line.match(
+    /^(\s*(?:(?:[-*+]\s+(?:\[[ xX]\]\s+)?)|(?:\d+[.)]\s+)|(?:>\s+))*)(.*)$/
+  );
+  return {
+    prefix: match ? match[1] : "",
+    body: match ? match[2] : line
+  };
+}
+function shouldCorrectLine(line) {
+  const editable = splitEditableLine(line);
+  const body = editable.body.trim();
+  if (!body) {
+    return { shouldCorrect: false, reason: "empty", editable };
+  }
+  if (isProtectedMarkdownLine(line)) {
+    return { shouldCorrect: false, reason: "protected-markdown", editable };
+  }
+  if (countLetters(body) < DEFAULT_MIN_LETTERS) {
+    return { shouldCorrect: false, reason: "not-enough-letters", editable };
+  }
+  if (!/[A-Za-z]/.test(body)) {
+    return { shouldCorrect: false, reason: "no-ascii-letters", editable };
+  }
+  if (/^[\W\d_]+$/.test(body)) {
+    return { shouldCorrect: false, reason: "punctuation-or-numbers", editable };
+  }
+  if (isLikelyUrlOrEmail(body)) {
+    return { shouldCorrect: false, reason: "url-or-email", editable };
+  }
+  return { shouldCorrect: true, editable };
+}
+function buildCorrectionPrompt(text) {
+  return [
+    "You are an autocorrect engine for a Markdown note editor.",
+    "Correct only clear spelling mistakes in the input text.",
+    "Preserve the user's wording, casing, punctuation, whitespace, Markdown meaning, and language.",
+    "Do not add tags, hashtags, links, headings, bullets, frontmatter, code blocks, or new Markdown structure.",
+    'Return only compact JSON in this exact shape: {"corrected":"..."}.',
+    "",
+    JSON.stringify({ text })
+  ].join("\n");
+}
+function parseCorrectionResponse(content) {
+  const parsedJson = parseJsonCorrection(content);
+  if (parsedJson !== null) {
+    return parsedJson;
+  }
+  const tagMatch = content.match(/<corrected_text>([\s\S]*?)<\/corrected_text>/i);
+  if (tagMatch) {
+    return tagMatch[1];
+  }
+  return content.trim() ? content.trim() : null;
+}
+function validateCorrection(original, candidate) {
+  if (candidate === null) {
+    return { accepted: false, reason: "missing-correction" };
+  }
+  if (/\r?\n/.test(candidate)) {
+    return { accepted: false, reason: "added-newline" };
+  }
+  const corrected = candidate.replace(/\r?\n/g, " ").trim();
+  const originalTrimmed = original.trim();
+  if (!corrected) {
+    return { accepted: false, reason: "empty-correction" };
+  }
+  if (corrected === original) {
+    return { accepted: false, reason: "unchanged" };
+  }
+  if (corrected.length > original.length * MAX_LENGTH_MULTIPLIER + MAX_LENGTH_SLACK) {
+    return { accepted: false, reason: "too-long" };
+  }
+  if (!original.includes("#") && corrected.includes("#")) {
+    return { accepted: false, reason: "added-hashtag" };
+  }
+  if (!original.includes("[[") && corrected.includes("[[")) {
+    return { accepted: false, reason: "added-wikilink" };
+  }
+  if (!original.includes("](") && /\[[^\]]+\]\([^)]+\)/.test(corrected)) {
+    return { accepted: false, reason: "added-markdown-link" };
+  }
+  if (!originalTrimmed.startsWith("#") && corrected.trimStart().startsWith("#")) {
+    return { accepted: false, reason: "added-heading" };
+  }
+  if (!original.includes("```") && corrected.includes("```")) {
+    return { accepted: false, reason: "added-code-fence" };
+  }
+  return { accepted: true, corrected };
+}
+function parseJsonCorrection(content) {
+  const direct = parseJsonObject(content);
+  if (direct !== null) {
+    return direct;
+  }
+  const objectMatch = content.match(/\{[\s\S]*\}/);
+  return objectMatch ? parseJsonObject(objectMatch[0]) : null;
+}
+function parseJsonObject(content) {
+  try {
+    const parsed = JSON.parse(content);
+    return typeof parsed.corrected === "string" ? parsed.corrected : null;
+  } catch (e) {
+    return null;
+  }
+}
+function countLetters(text) {
+  const matches = text.match(/[A-Za-z]/g);
+  return matches ? matches.length : 0;
+}
+function isProtectedMarkdownLine(line) {
+  const trimmed = line.trim();
+  return /^#{1,6}\s/.test(trimmed) || /^```/.test(trimmed) || /^---$/.test(trimmed) || /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed) || /^#\S+$/.test(trimmed);
+}
+function isLikelyUrlOrEmail(text) {
+  return /^https?:\/\//i.test(text) || /^www\./i.test(text) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text);
+}
+
+// main.ts
 var DEFAULT_SETTINGS = {
-  status_notices: true,
+  status_notices: false,
   api_key: "",
-  autocorrect_on_enter: false
+  automatic_correction: true,
+  correct_on_enter: true,
+  correction_delay_ms: 1200,
+  model: "openai/gpt-oss-120b"
 };
 var AutoCorrecter = class extends import_obsidian.Plugin {
+  constructor() {
+    super(...arguments);
+    this.pendingCorrections = /* @__PURE__ */ new Map();
+    this.lastAppliedTextByLine = /* @__PURE__ */ new Map();
+    this.hasShownMissingApiKeyNotice = false;
+  }
   async onload() {
     await this.loadSettings();
     this.onKeyDown = this.onKeyDown.bind(this);
     this.registerDomEvent(document, "keydown", this.onKeyDown, true);
+    this.registerEvent(
+      this.app.workspace.on(
+        "editor-change",
+        (editor, info) => this.onEditorChange(editor, info)
+      )
+    );
     this.addCommand({
       id: "autocorrect-current-line",
       name: "Autocorrect current line",
       editorCallback: async (_editor, view) => {
         if (view instanceof import_obsidian.MarkdownView) {
-          await this.correctCurrentLine(view);
+          await this.correctLine(view.editor, view.editor.getCursor().line);
         }
       }
     });
     this.addSettingTab(new SettingTab(this.app, this));
     if (!this.settings.api_key) {
-      new import_obsidian.Notice(
-        "Please enter your Together.ai API key in the settings tab to use Obsidian AutoCorrect."
-      );
+      this.showMissingApiKeyNoticeOnce();
     }
   }
   onunload() {
+    this.clearPendingCorrections();
   }
   async loadSettings() {
     this.settings = Object.assign(
@@ -66,38 +203,84 @@ var AutoCorrecter = class extends import_obsidian.Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
   }
-  stripLeadingWhitespace(input) {
-    const match = input.match(/^[\t ]*/);
-    const leadingWhitespace = match ? match[0] : "";
-    const parsedText = input.replace(/^[\t ]*/, "");
-    return [leadingWhitespace, parsedText];
-  }
   async onKeyDown(event) {
-    if (event.key === "Enter" && this.settings.autocorrect_on_enter) {
+    if (event.key === "Enter" && this.settings.automatic_correction && this.settings.correct_on_enter) {
       const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
       if (view) {
-        void this.correctCurrentLine(view);
+        const lineToCorrect = view.editor.getCursor().line;
+        this.scheduleCorrection(view.editor, lineToCorrect, 50);
       }
     }
   }
-  async correctCurrentLine(view) {
-    const cursor = view.editor.getCursor();
-    const text = view.editor.getLine(cursor.line);
-    if (text.trim() === "") {
+  onEditorChange(editor, _info) {
+    if (!this.settings.automatic_correction || editor.somethingSelected()) {
       return;
     }
-    const [leadingWhitespace, parsedText] = this.stripLeadingWhitespace(text);
+    const cursor = editor.getCursor();
+    this.scheduleCorrection(editor, cursor.line, this.settings.correction_delay_ms);
+  }
+  scheduleCorrection(editor, line, delayMs) {
+    const key = this.correctionKey(editor, line);
+    const existing = this.pendingCorrections.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timeout = setTimeout(() => {
+      this.pendingCorrections.delete(key);
+      void this.correctLine(editor, line);
+    }, delayMs);
+    this.pendingCorrections.set(key, timeout);
+  }
+  clearPendingCorrections() {
+    this.pendingCorrections.forEach((timeout) => clearTimeout(timeout));
+    this.pendingCorrections.clear();
+  }
+  async correctLine(editor, line) {
+    var _a;
+    if (line < 0 || line >= editor.lineCount()) {
+      return;
+    }
+    if (!this.settings.api_key) {
+      this.showMissingApiKeyNoticeOnce();
+      return;
+    }
+    const originalLine = editor.getLine(line);
+    const decision = shouldCorrectLine(originalLine);
+    if (!decision.shouldCorrect) {
+      return;
+    }
+    const key = this.correctionKey(editor, line);
+    if (this.lastAppliedTextByLine.get(key) === originalLine) {
+      return;
+    }
+    const originalBody = decision.editable.body;
     let status = null;
     if (this.settings.status_notices) {
       status = new import_obsidian.Notice(
-        "Correcting spelling on line " + (cursor.line + 1) + "...",
+        "Correcting spelling on line " + (line + 1) + "...",
         0
       );
     }
-    const response = await this.getLLMResponse(parsedText);
-    if (response.corrected_spelling) {
-      const correctedText = leadingWhitespace + response.corrected_spelling;
-      view.editor.setLine(cursor.line, correctedText);
+    const response = await this.getLLMResponse(originalBody);
+    const validation = validateCorrection(
+      originalBody,
+      (_a = response.corrected_spelling) != null ? _a : null
+    );
+    if (validation.accepted && validation.corrected) {
+      const latestLine = editor.getLine(line);
+      const latestDecision = shouldCorrectLine(latestLine);
+      if (!latestDecision.shouldCorrect || latestDecision.editable.body !== originalBody) {
+        status == null ? void 0 : status.hide();
+        return;
+      }
+      const correctedLine = latestDecision.editable.prefix + validation.corrected;
+      const cursor = editor.getCursor();
+      const cursorWasAtEnd = cursor.line === line && cursor.ch >= latestLine.length;
+      editor.setLine(line, correctedLine);
+      this.lastAppliedTextByLine.set(key, correctedLine);
+      if (cursorWasAtEnd) {
+        editor.setCursor({ line, ch: correctedLine.length });
+      }
       if (status) {
         status.hide();
       }
@@ -105,35 +288,25 @@ var AutoCorrecter = class extends import_obsidian.Plugin {
       if (status) {
         status.hide();
       }
-      new import_obsidian.Notice(
-        "Error correcting spelling. Make sure API key is correct and Internet is working."
-      );
+      if (response.error) {
+        new import_obsidian.Notice(response.error);
+      }
     }
   }
   async getLLMResponse(text) {
+    var _a, _b, _c, _d;
     const url = "https://api.groq.com/openai/v1/chat/completions";
     const apiKey = this.settings.api_key;
-    const content = `Your task is to take input text that may contain spelling errors and correct those errors while
-			preserving the original meaning, grammar, punctuation and formatting. The text may contain Markdown
-			or other formatting which should be maintained in the output.
-			
-			<input_text>
-			${text}
-			</input_text>
-			
-			Provide the corrected version of the input text with all formatting perfectly preserved inside
-			<corrected_text> tags. ONLY correct clear spelling mistakes. Do not make any other changes.
-			Never add tags, hashtags, links, headings, or new markdown structure.
-			
-			Example format for your response:
-  			<corrected_text>Corrected version of the input text with all formatting perfectly preserved.</corrected_text>`;
+    const content = buildCorrectionPrompt(text);
     const headers = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     };
     const data = {
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content }]
+      model: this.settings.model,
+      messages: [{ role: "user", content }],
+      temperature: 0,
+      max_tokens: Math.min(256, Math.max(32, text.length * 2))
     };
     const params = {
       method: "POST",
@@ -143,13 +316,36 @@ var AutoCorrecter = class extends import_obsidian.Plugin {
     };
     try {
       const response = await (0, import_obsidian.requestUrl)(params);
-      console.log(response);
-      const parsedResponse = response.json.choices[0].message.content.split("<corrected_text>")[1].split("</corrected_text>")[0].replace(/\n/g, "");
+      const content2 = (_d = (_c = (_b = (_a = response.json) == null ? void 0 : _a.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content;
+      if (typeof content2 !== "string") {
+        return { error: "Autocorrect returned an invalid response." };
+      }
+      const parsedResponse = parseCorrectionResponse(content2);
+      if (parsedResponse === null) {
+        return { error: "Autocorrect returned an empty response." };
+      }
       return { corrected_spelling: parsedResponse };
     } catch (error) {
       console.error(error);
-      return error;
+      return {
+        error: "Error correcting spelling. Make sure the Groq API key is correct and Internet is working."
+      };
     }
+  }
+  showMissingApiKeyNoticeOnce() {
+    if (this.hasShownMissingApiKeyNotice) {
+      return;
+    }
+    this.hasShownMissingApiKeyNotice = true;
+    new import_obsidian.Notice(
+      "Please enter your Groq API key in the settings tab to use Obsidian AutoCorrect."
+    );
+  }
+  correctionKey(editor, line) {
+    var _a, _b;
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    const filePath = (view == null ? void 0 : view.editor) === editor ? (_b = (_a = view.file) == null ? void 0 : _a.path) != null ? _b : "active" : "active";
+    return `${filePath}:${line}`;
   }
 };
 var SettingTab = class extends import_obsidian.PluginSettingTab {
@@ -174,13 +370,34 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Autocorrect on Enter").setDesc(
-      "When enabled, pressing Enter also runs autocorrect on the current line."
-    ).addToggle((toggle) => {
-      toggle.setValue(this.plugin.settings.autocorrect_on_enter).onChange(async (value) => {
-        this.plugin.settings.autocorrect_on_enter = value;
+    new import_obsidian.Setting(containerEl).setName("Automatic Correction").setDesc("Correct the active line automatically after typing pauses.").addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings.automatic_correction).onChange(async (value) => {
+        this.plugin.settings.automatic_correction = value;
         await this.plugin.saveSettings();
       });
     });
+    new import_obsidian.Setting(containerEl).setName("Correct after Enter").setDesc(
+      "When automatic correction is enabled, also correct the line you just finished after pressing Enter."
+    ).addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings.correct_on_enter).onChange(async (value) => {
+        this.plugin.settings.correct_on_enter = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Correction Delay").setDesc("Milliseconds to wait after typing stops before correcting.").addText(
+      (text) => text.setPlaceholder("1200").setValue(String(this.plugin.settings.correction_delay_ms)).onChange(async (value) => {
+        const parsed = Number.parseInt(value, 10);
+        if (!Number.isNaN(parsed) && parsed >= 300) {
+          this.plugin.settings.correction_delay_ms = parsed;
+          await this.plugin.saveSettings();
+        }
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Groq Model").setDesc("OpenAI-compatible Groq model used for autocorrection.").addText(
+      (text) => text.setPlaceholder(DEFAULT_SETTINGS.model).setValue(this.plugin.settings.model).onChange(async (value) => {
+        this.plugin.settings.model = value.trim() || DEFAULT_SETTINGS.model;
+        await this.plugin.saveSettings();
+      })
+    );
   }
 };
