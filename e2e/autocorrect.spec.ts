@@ -1,12 +1,18 @@
 import { Browser, chromium, expect, test } from "@playwright/test";
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import {
+	execFile,
+	spawn,
+	type ChildProcessWithoutNullStreams,
+} from "child_process";
+import { access, cp, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import http from "http";
 import os from "os";
 import path from "path";
+import { promisify } from "util";
 
 const PLUGIN_ID = "obsidian-autocorrect";
 const COMMAND_ID = `${PLUGIN_ID}:autocorrect-current-line`;
+const execFileAsync = promisify(execFile);
 
 test.skip(
 	!process.env.OBSIDIAN_PATH,
@@ -105,6 +111,12 @@ test("manual command corrects a note through Obsidian", async () => {
 		const page =
 			context.pages()[0] ??
 			(await context.waitForEvent("page", { timeout: 30_000 }));
+		page.on("console", (message) =>
+			console.log(`Obsidian console ${message.type()}: ${message.text()}`)
+		);
+		page.on("pageerror", (error) =>
+			console.error(`Obsidian page error: ${error.message}`)
+		);
 
 		await page.route("https://api.groq.com/**", async (route) => {
 			await route.fulfill({
@@ -127,14 +139,41 @@ test("manual command corrects a note through Obsidian", async () => {
 		await page.waitForFunction(() => Boolean(window.app?.workspace), undefined, {
 			timeout: 30_000,
 		});
-		await page.evaluate(async (id) => {
+
+		await runObsidianCli(
+			process.env.OBSIDIAN_PATH as string,
+			["plugins:restrict", "off"],
+			xdgConfigHome
+		);
+		await runObsidianCli(
+			process.env.OBSIDIAN_PATH as string,
+			["plugin:enable", `id=${PLUGIN_ID}`, "filter=community"],
+			xdgConfigHome
+		);
+
+		const pluginDiagnostics = await page.evaluate(async (id) => {
 			const plugins = window.app.plugins;
+			const describe = () => ({
+				enabledPlugins: Array.from(plugins.enabledPlugins ?? []),
+				loadedPlugins: Object.keys(plugins.plugins ?? {}),
+				manifestIds: Object.keys(plugins.manifests ?? {}),
+				methods: Object.getOwnPropertyNames(Object.getPrototypeOf(plugins)),
+				hasPlugin: Boolean(plugins.plugins?.[id]),
+				hasManifest: Boolean(plugins.manifests?.[id]),
+			});
+
 			await plugins.loadManifests?.();
+			await plugins.enablePluginAndSave?.(id);
 			await plugins.enablePlugin?.(id);
 			if (!plugins.plugins?.[id]) {
 				await plugins.loadPlugin?.(id);
 			}
+			return describe();
 		}, PLUGIN_ID);
+		console.log(
+			"Obsidian plugin diagnostics",
+			JSON.stringify(pluginDiagnostics, null, 2)
+		);
 		await page.waitForFunction(
 			(id) => Boolean(window.app?.plugins?.plugins?.[id]),
 			PLUGIN_ID,
@@ -219,4 +258,26 @@ function isCdpReady(port: number): Promise<boolean> {
 			finish(false);
 		});
 	});
+}
+
+async function runObsidianCli(
+	obsidianPath: string,
+	args: string[],
+	xdgConfigHome: string
+): Promise<void> {
+	const cliPath = path.join(path.dirname(obsidianPath), "obsidian-cli");
+	await access(cliPath);
+	const { stdout, stderr } = await execFileAsync(cliPath, args, {
+		env: {
+			...process.env,
+			XDG_CONFIG_HOME: xdgConfigHome,
+		},
+		timeout: 15_000,
+	});
+	if (stdout.trim()) {
+		console.log(`obsidian-cli ${args[0]} stdout: ${stdout.trim()}`);
+	}
+	if (stderr.trim()) {
+		console.log(`obsidian-cli ${args[0]} stderr: ${stderr.trim()}`);
+	}
 }
