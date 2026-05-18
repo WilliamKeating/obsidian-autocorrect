@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Read plugin version
+        id: plugin
+        run: |
+          VERSION="$(node -p "require('./manifest.json').version")"
+          MIN_APP_VERSION="$(node -p "require('./manifest.json').minAppVersion")"
+          TAG="v${VERSION}"
+          node -e "const manifest=require('./manifest.json'); const versions=require('./versions.json'); if (versions[manifest.version] !== manifest.minAppVersion) throw new Error('versions.json is missing '+manifest.version+' -> '+manifest.minAppVersion);"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "min_app_version=${MIN_APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check release state
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plugin.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release tag
+        if: github.ref_type == 'branch' && steps.release.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.plugin.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create GitHub release
+        if: steps.release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plugin.outputs.tag }}
+        run: |
+          PREVIOUS_TAG="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || true)"
+          if [ -n "$PREVIOUS_TAG" ]; then
+            NOTES="**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS_TAG}...${TAG}"
+          else
+            NOTES="Release ${TAG}"
+          fi
+          gh release create "$TAG" main.js manifest.json --target "$GITHUB_SHA" --title "$TAG" --notes "$NOTES"
