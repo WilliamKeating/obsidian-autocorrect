@@ -95,4 +95,4 @@ jobs:
       - name: Run Obsidian E2E smoke test
         env:
           OBSIDIAN_PATH: ${{ github.workspace }}/squashfs-root/obsidian
-        run: xvfb-run -a npm run test:e2e
+        run: timeout 180s xvfb-run -a npm run test:e2e
