@@ -20,6 +20,8 @@ test("manual command corrects a note through Obsidian", async () => {
 	const vault = path.join(root, "vault");
 	const pluginDir = path.join(vault, ".obsidian", "plugins", PLUGIN_ID);
 	const notePath = path.join(vault, "Autocorrect E2E.md");
+	const xdgConfigHome = path.join(root, "xdg-config");
+	const obsidianConfigDir = path.join(xdgConfigHome, "obsidian");
 	const repoRoot = path.resolve(__dirname, "..");
 	const remoteDebuggingPort = 9222;
 	let obsidian: ChildProcessWithoutNullStreams | null = null;
@@ -46,6 +48,20 @@ test("manual command corrects a note through Obsidian", async () => {
 		}),
 		"utf8"
 	);
+	await mkdir(obsidianConfigDir, { recursive: true });
+	await writeFile(
+		path.join(obsidianConfigDir, "obsidian.json"),
+		JSON.stringify({
+			vaults: {
+				e2e: {
+					path: vault,
+					ts: Date.now(),
+					open: true,
+				},
+			},
+		}),
+		"utf8"
+	);
 
 	try {
 		console.log("Launching Obsidian test process");
@@ -58,7 +74,7 @@ test("manual command corrects a note through Obsidian", async () => {
 			detached: true,
 			env: {
 				...process.env,
-				XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+				XDG_CONFIG_HOME: xdgConfigHome,
 			},
 		});
 		obsidian.stdout.on("data", (data) => process.stdout.write(data));
