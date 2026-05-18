@@ -138,38 +138,39 @@ test("manual command corrects a note through Obsidian", async () => {
 	}
 });
 
-function waitForCdp(port: number): Promise<void> {
+async function waitForCdp(port: number): Promise<void> {
 	const deadline = Date.now() + 45_000;
+	while (Date.now() < deadline) {
+		if (await isCdpReady(port)) {
+			return;
+		}
+		await new Promise((ready) => setTimeout(ready, 500));
+	}
+	throw new Error("Timed out waiting for Obsidian CDP endpoint.");
+}
 
-	return new Promise((resolve, reject) => {
-		const check = () => {
-			const request = http.get(
-				`http://127.0.0.1:${port}/json/version`,
-				(response) => {
-					response.resume();
-					if (response.statusCode === 200) {
-						resolve();
-						return;
-					}
-					retry();
-				}
-			);
-
-			request.on("error", retry);
-			request.setTimeout(1000, () => {
-				request.destroy();
-				retry();
-			});
-		};
-
-		const retry = () => {
-			if (Date.now() > deadline) {
-				reject(new Error("Timed out waiting for Obsidian CDP endpoint."));
-				return;
+function isCdpReady(port: number): Promise<boolean> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (ready: boolean) => {
+			if (!settled) {
+				settled = true;
+				resolve(ready);
 			}
-			setTimeout(check, 500);
 		};
 
-		check();
+		const request = http.get(
+			`http://127.0.0.1:${port}/json/version`,
+			(response) => {
+				response.resume();
+				finish(response.statusCode === 200);
+			}
+		);
+
+		request.on("error", () => finish(false));
+		request.setTimeout(1000, () => {
+			request.destroy();
+			finish(false);
+		});
 	});
 }
