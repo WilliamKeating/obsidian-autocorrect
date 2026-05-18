@@ -1,6 +1,8 @@
 import {
 	Plugin,
 	MarkdownView,
+	Editor,
+	MarkdownFileInfo,
 	Notice,
 	RequestUrlParam,
 	requestUrl,
@@ -8,33 +10,64 @@ import {
 	Setting,
 	App,
 } from "obsidian";
+import {
+	buildCorrectionPrompt,
+	parseCorrectionResponse,
+	shouldCorrectLine,
+	validateCorrection,
+} from "./correction";
 
 interface PluginSettings {
 	api_key: string;
 	status_notices: boolean;
+	automatic_correction: boolean;
+	correct_on_enter: boolean;
+	correction_delay_ms: number;
+	model: string;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
-	status_notices: true,
+	status_notices: false,
 	api_key: "",
+	automatic_correction: true,
+	correct_on_enter: true,
+	correction_delay_ms: 1200,
+	model: "openai/gpt-oss-120b",
 };
 
 export default class AutoCorrecter extends Plugin {
 	settings: PluginSettings;
+	pendingCorrections: Map<string, ReturnType<typeof setTimeout>> = new Map();
+	lastAppliedTextByLine: Map<string, string> = new Map();
+	hasShownMissingApiKeyNotice = false;
 
 	async onload() {
 		await this.loadSettings();
 		this.onKeyDown = this.onKeyDown.bind(this);
 		this.registerDomEvent(document, "keydown", this.onKeyDown, true);
+		this.registerEvent(
+			this.app.workspace.on("editor-change", (editor, info) =>
+				this.onEditorChange(editor, info)
+			)
+		);
+		this.addCommand({
+			id: "autocorrect-current-line",
+			name: "Autocorrect current line",
+			editorCallback: async (_editor, view) => {
+				if (view instanceof MarkdownView) {
+					await this.correctLine(view.editor, view.editor.getCursor().line);
+				}
+			},
+		});
 		this.addSettingTab(new SettingTab(this.app, this));
 		if (!this.settings.api_key) {
-			new Notice(
-				"Please enter your Together.ai API key in the settings tab to use Obsidian AutoCorrect."
-			);
+			this.showMissingApiKeyNoticeOnce();
 		}
 	}
 
-	onunload() {}
+	onunload() {
+		this.clearPendingCorrections();
+	}
 
 	async loadSettings() {
 		this.settings = Object.assign(
@@ -47,74 +80,128 @@ export default class AutoCorrecter extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
-	stripLeadingWhitespace(input: string): [string, string] {
-		const match = input.match(/^[\t ]*/);
-		const leadingWhitespace = match ? match[0] : "";
-		const parsedText = input.replace(/^[\t ]*/, "");
-		return [leadingWhitespace, parsedText];
-	}
 
 	async onKeyDown(event: KeyboardEvent) {
-		if (event.key === "Enter") {
+		if (
+			event.key === "Enter" &&
+			this.settings.automatic_correction &&
+			this.settings.correct_on_enter
+		) {
 			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-			// Make sure the user is editing a Markdown file.
 			if (view) {
-				const cursor = view.editor.getCursor();
-				const text = view.editor.getLine(cursor.line);
-				// Check if the text is empty and return early if it is
-				if (text.trim() === "") {
-					return;
-				}
-				// LLM has a very hard time reproducing the leading tabs in markdown bullet points
-				const [leadingWhitespace, parsedText] =
-					this.stripLeadingWhitespace(text);
-				console.log(cursor);
-				console.log(text);
-				let status: Notice | null = null;
-				if (this.settings.status_notices) {
-					status = new Notice(
-						"Correcting spelling on line " +
-							(cursor.line + 1) +
-							"...",
-						0
-					);
-				}
-				const response: any = await this.getLLMResponse(parsedText);
-				console.log(response);
-				if (response.corrected_spelling) {
-					const correctedText =
-						leadingWhitespace + response.corrected_spelling;
-					view.editor.setLine(cursor.line, correctedText);
-					if (status) {
-						status.hide();
-					}
-				} else {
-					if (status) {
-						status.hide();
-					}
-					new Notice(
-						"Error correcting spelling. Make sure API key is correct and Internet is working."
-					);
-				}
+				const lineToCorrect = view.editor.getCursor().line;
+				this.scheduleCorrection(view.editor, lineToCorrect, 50);
 			}
 		}
 	}
-	async getLLMResponse(text: string) {
+
+	onEditorChange(editor: Editor, _info: MarkdownView | MarkdownFileInfo) {
+		if (!this.settings.automatic_correction || editor.somethingSelected()) {
+			return;
+		}
+
+		const cursor = editor.getCursor();
+		this.scheduleCorrection(editor, cursor.line, this.settings.correction_delay_ms);
+	}
+
+	scheduleCorrection(editor: Editor, line: number, delayMs: number) {
+		const key = this.correctionKey(editor, line);
+		const existing = this.pendingCorrections.get(key);
+		if (existing) {
+			clearTimeout(existing);
+		}
+
+		const timeout = setTimeout(() => {
+			this.pendingCorrections.delete(key);
+			void this.correctLine(editor, line);
+		}, delayMs);
+
+		this.pendingCorrections.set(key, timeout);
+	}
+
+	clearPendingCorrections() {
+		this.pendingCorrections.forEach((timeout) => clearTimeout(timeout));
+		this.pendingCorrections.clear();
+	}
+
+	async correctLine(editor: Editor, line: number) {
+		if (line < 0 || line >= editor.lineCount()) {
+			return;
+		}
+
+		if (!this.settings.api_key) {
+			this.showMissingApiKeyNoticeOnce();
+			return;
+		}
+
+		const originalLine = editor.getLine(line);
+		const decision = shouldCorrectLine(originalLine);
+		if (!decision.shouldCorrect) {
+			return;
+		}
+
+		const key = this.correctionKey(editor, line);
+		if (this.lastAppliedTextByLine.get(key) === originalLine) {
+			return;
+		}
+
+		const originalBody = decision.editable.body;
+		let status: Notice | null = null;
+		if (this.settings.status_notices) {
+			status = new Notice(
+				"Correcting spelling on line " + (line + 1) + "...",
+				0
+			);
+		}
+
+		const response = await this.getLLMResponse(originalBody);
+		const validation = validateCorrection(
+			originalBody,
+			response.corrected_spelling ?? null
+		);
+
+		if (validation.accepted && validation.corrected) {
+			const latestLine = editor.getLine(line);
+			const latestDecision = shouldCorrectLine(latestLine);
+			if (
+				!latestDecision.shouldCorrect ||
+				latestDecision.editable.body !== originalBody
+			) {
+				status?.hide();
+				return;
+			}
+
+			const correctedLine =
+				latestDecision.editable.prefix + validation.corrected;
+			const cursor = editor.getCursor();
+			const cursorWasAtEnd = cursor.line === line && cursor.ch >= latestLine.length;
+
+			editor.setLine(line, correctedLine);
+			this.lastAppliedTextByLine.set(key, correctedLine);
+			if (cursorWasAtEnd) {
+				editor.setCursor({ line, ch: correctedLine.length });
+			}
+
+			if (status) {
+				status.hide();
+			}
+		} else {
+			if (status) {
+				status.hide();
+			}
+			if (response.error) {
+				new Notice(response.error);
+			}
+		}
+	}
+
+	async getLLMResponse(text: string): Promise<{
+		corrected_spelling?: string;
+		error?: string;
+	}> {
 		const url = "https://api.groq.com/openai/v1/chat/completions";
 		const apiKey = this.settings.api_key;
-		const content = `Your task is to take input text that may contain spelling errors and correct those errors while
-			preserving the original meaning, grammar, punctuation and formatting. The text may contain Markdown
-			or other formatting which should be maintained in the output.
-			
-			<input_text>
-			${text}
-			</input_text>
-			
-			Provide the corrected version of the input text with all formatting perfectly preserved inside
-			<corrected_text> tags. ONLY correct clear spelling mistakes. Do not make any other changes.
-			
-			Example format for your response:
-  			<corrected_text>Corrected version of the input text with all formatting perfectly preserved.</corrected_text>`;
+		const content = buildCorrectionPrompt(text);
 
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
@@ -122,8 +209,10 @@ export default class AutoCorrecter extends Plugin {
 		};
 
 		const data = {
-			model: "llama-3.3-70b-versatile",
+			model: this.settings.model,
 			messages: [{ role: "user", content: content }],
+			temperature: 0,
+			max_tokens: Math.min(256, Math.max(32, text.length * 2)),
 		};
 
 		const params: RequestUrlParam = {
@@ -134,17 +223,41 @@ export default class AutoCorrecter extends Plugin {
 		};
 		try {
 			const response: any = await requestUrl(params);
-			console.log(response);
-			const parsedResponse = response.json.choices[0].message.content
-				.split("<corrected_text>")[1]
-				.split("</corrected_text>")[0]
-				.replace(/\n/g, "");
+			const content = response.json?.choices?.[0]?.message?.content;
+			if (typeof content !== "string") {
+				return { error: "Autocorrect returned an invalid response." };
+			}
+
+			const parsedResponse = parseCorrectionResponse(content);
+			if (parsedResponse === null) {
+				return { error: "Autocorrect returned an empty response." };
+			}
 
 			return { corrected_spelling: parsedResponse };
 		} catch (error) {
 			console.error(error);
-			return error;
+			return {
+				error:
+					"Error correcting spelling. Make sure the Groq API key is correct and Internet is working.",
+			};
 		}
+	}
+
+	showMissingApiKeyNoticeOnce() {
+		if (this.hasShownMissingApiKeyNotice) {
+			return;
+		}
+
+		this.hasShownMissingApiKeyNotice = true;
+		new Notice(
+			"Please enter your Groq API key in the settings tab to use Obsidian AutoCorrect."
+		);
+	}
+
+	correctionKey(editor: Editor, line: number): string {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const filePath = view?.editor === editor ? view.file?.path ?? "active" : "active";
+		return `${filePath}:${line}`;
 	}
 }
 class SettingTab extends PluginSettingTab {
@@ -186,5 +299,61 @@ class SettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
+
+		new Setting(containerEl)
+			.setName("Automatic Correction")
+			.setDesc("Correct the active line automatically after typing pauses.")
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.automatic_correction)
+					.onChange(async (value) => {
+						this.plugin.settings.automatic_correction = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Correct after Enter")
+			.setDesc(
+				"When automatic correction is enabled, also correct the line you just finished after pressing Enter."
+			)
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.correct_on_enter)
+					.onChange(async (value) => {
+						this.plugin.settings.correct_on_enter = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Correction Delay")
+			.setDesc("Milliseconds to wait after typing stops before correcting.")
+			.addText((text) =>
+				text
+					.setPlaceholder("1200")
+					.setValue(String(this.plugin.settings.correction_delay_ms))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (!Number.isNaN(parsed) && parsed >= 300) {
+							this.plugin.settings.correction_delay_ms = parsed;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Groq Model")
+			.setDesc("OpenAI-compatible Groq model used for autocorrection.")
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.model)
+					.setValue(this.plugin.settings.model)
+					.onChange(async (value) => {
+						this.plugin.settings.model =
+							value.trim() || DEFAULT_SETTINGS.model;
+						await this.plugin.saveSettings();
+					})
+			);
 	}
 }
