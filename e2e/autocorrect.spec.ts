@@ -1,5 +1,7 @@
-import { _electron as electron, expect, test } from "@playwright/test";
+import { chromium, expect, test } from "@playwright/test";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import http from "http";
 import os from "os";
 import path from "path";
 
@@ -12,11 +14,15 @@ test.skip(
 );
 
 test("manual command corrects a note through Obsidian", async () => {
+	test.setTimeout(120_000);
+
 	const root = await mkdtemp(path.join(os.tmpdir(), "obsidian-autocorrect-e2e-"));
 	const vault = path.join(root, "vault");
 	const pluginDir = path.join(vault, ".obsidian", "plugins", PLUGIN_ID);
 	const notePath = path.join(vault, "Autocorrect E2E.md");
 	const repoRoot = path.resolve(__dirname, "..");
+	const remoteDebuggingPort = 9222;
+	let obsidian: ChildProcessWithoutNullStreams | null = null;
 
 	await mkdir(pluginDir, { recursive: true });
 	await cp(path.join(repoRoot, "main.js"), path.join(pluginDir, "main.js"));
@@ -40,17 +46,28 @@ test("manual command corrects a note through Obsidian", async () => {
 		"utf8"
 	);
 
-	const app = await electron.launch({
-		executablePath: process.env.OBSIDIAN_PATH,
-		args: [vault, "--no-sandbox", "--disable-gpu"],
+	try {
+		obsidian = spawn(process.env.OBSIDIAN_PATH as string, [
+			vault,
+			`--remote-debugging-port=${remoteDebuggingPort}`,
+			"--no-sandbox",
+			"--disable-gpu",
+		], {
 		env: {
 			...process.env,
 			XDG_CONFIG_HOME: path.join(root, "xdg-config"),
 		},
-	});
+		});
+		obsidian.stdout.on("data", (data) => process.stdout.write(data));
+		obsidian.stderr.on("data", (data) => process.stderr.write(data));
 
-	try {
-		const page = await app.firstWindow();
+		await waitForCdp(remoteDebuggingPort);
+		const browser = await chromium.connectOverCDP(
+			`http://127.0.0.1:${remoteDebuggingPort}`
+		);
+		const context = browser.contexts()[0] ?? (await browser.newContext());
+		const page = context.pages()[0] ?? (await context.waitForEvent("page"));
+
 		await page.route("https://api.groq.com/**", async (route) => {
 			await route.fulfill({
 				status: 200,
@@ -96,8 +113,48 @@ test("manual command corrects a note through Obsidian", async () => {
 				page.evaluate(() => window.app.workspace.activeEditor?.editor?.getLine(0))
 			)
 			.toBe("the quick brown fox");
+
+		await browser.close();
 	} finally {
-		await app.close();
+		if (obsidian && !obsidian.killed) {
+			obsidian.kill();
+		}
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+function waitForCdp(port: number): Promise<void> {
+	const deadline = Date.now() + 45_000;
+
+	return new Promise((resolve, reject) => {
+		const check = () => {
+			const request = http.get(
+				`http://127.0.0.1:${port}/json/version`,
+				(response) => {
+					response.resume();
+					if (response.statusCode === 200) {
+						resolve();
+						return;
+					}
+					retry();
+				}
+			);
+
+			request.on("error", retry);
+			request.setTimeout(1000, () => {
+				request.destroy();
+				retry();
+			});
+		};
+
+		const retry = () => {
+			if (Date.now() > deadline) {
+				reject(new Error("Timed out waiting for Obsidian CDP endpoint."));
+				return;
+			}
+			setTimeout(check, 500);
+		};
+
+		check();
+	});
+}
